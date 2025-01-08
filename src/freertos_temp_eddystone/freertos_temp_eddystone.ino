@@ -1,45 +1,46 @@
+//BLE Eddystone header files
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEBeacon.h>
 #include <BLEAdvertising.h>
-#include "freertos/ringbuf.h"  // Add this for ring buffer
-
-#include <DHT.h>
+#include "freertos/ringbuf.h" //ring buffer header file
+#include <DHT.h> //temp sensor header file
 
 #define DHTPIN 18     // gpio pin to connect to sensor
 #define DHTTYPE DHT11 
 
-DHT dht(DHTPIN, DHTTYPE);
+DHT dht(DHTPIN, DHTTYPE); //create dht object
 
-//Task 1: sensor read task which grabs a new temperature every second and puts that reading into a FreeRTOS Queue
-//Task 2: waits for a new reading in the FreeRTOS Queue and puts the new reading into a shared ring buffer and increments a FreeRTOS Semaphore.
-//Task 3: checks the FreeRTOS Semaphore and updates the BLE eddystone beacontemperature data with the new reading if available.
 #if CONFIG_FREERTOS_UNICORE
 static const BaseType_t app_cpu = 0;
 #else
 static const BaseType_t app_cpu = 1;
 #endif
 
-float temp_received; 
 
-static SemaphoreHandle_t mutex;
+float temp_received; //global variable to receive temperature reading from sensor 
 
+
+static SemaphoreHandle_t mutex; //create mutex
+
+static QueueHandle_t msg_queue_temp = NULL; //create queue
 static const uint8_t msg_queue_len = 5; //length of the queue
 
-static QueueHandle_t msg_queue_temp = NULL;
-//Initialize task handles
+//Task Handles
 static TaskHandle_t task_1 = NULL;
 static TaskHandle_t task_2 = NULL;
 static TaskHandle_t task_3 = NULL;
-//Initialize ring buffer 
+
+//Ring buffer initializations
 RingbufHandle_t buf_handle;
 int buffer_length = 5;
 size_t buffer_size = buffer_length * sizeof(float) * 10;  // 5 * 4 = 20 bytes
-//Eddystone
 
+//Eddystone
 BLEAdvertising *pAdvertising;
 uint32_t sequenceNumber = 0;
 
+//Task 1: sensor read task which grabs a new temperature every second and puts that reading into a FreeRTOS Queue
 void readTempandQueue(void *parameters){
   while (1){
     temp_received = dht.readTemperature();
@@ -50,11 +51,12 @@ void readTempandQueue(void *parameters){
   }
 }
 
+//Task 2: waits for a new reading in the FreeRTOS Queue and puts the new reading into a shared ring buffer and increments a FreeRTOS Semaphore.
 void storeValueBuffer(void *parameters){
   float temp_buffer;
   while (1){
     if (xQueueReceive(msg_queue_temp, (void *)&temp_buffer, 0) == pdTRUE){
-      //put in ring buffer
+      //put in ring buffer if it is not full
       if (xRingbufferSend(buf_handle, &temp_buffer, sizeof(temp_buffer), 0) != pdTRUE) {
         Serial.println("RING BUFFER FULL");
       }
@@ -63,6 +65,7 @@ void storeValueBuffer(void *parameters){
   }
 }
 
+//Task 3: checks the FreeRTOS Semaphore and updates the BLE eddystone beacontemperature data with the new reading if available.
 void updateBLE(void *parameters){
   size_t item_size;
 
@@ -86,28 +89,22 @@ void loop() {
 void broadcastTemperature(float temperature) {
   BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
   
-  // Create Eddystone URL data
+  //Eddystone URL data and frame
   uint8_t eddyData[20];
-  int idx = 0;
-  
-  // Eddystone Frame
-  eddyData[idx++] = 0x10;  // Frame type
-  eddyData[idx++] = 0xF8;  // TX power at 0m
-  eddyData[idx++] = 0x03;  // URL prefix (https://)
-  
-  // Add domain and temperature to URL
-  String urlStr = "temp.io/" + String(temperature, 1);
-  memcpy(&eddyData[idx], urlStr.c_str(), urlStr.length());
-  idx += urlStr.length();
-  
-  // Convert to String and set as service data
-  String serviceData = String((char*)eddyData, idx);
+  int i = 0;
+  eddyData[i++] = 0x10;  // frame type
+  eddyData[i++] = 0xF8;  // TX power at 0m
+  eddyData[i++] = 0x03;  // URL prefix (https://)
+  //add domain and temp
+  String url_str = "temp.io/" + String(temperature, 1);
+  memcpy(&eddyData[i], url_str.c_str(), url_str.length());
+  i += url_str.length();
+  //convert to string
+  String serviceData = String((char*)eddyData, i);
   oAdvertisementData.setServiceData(BLEUUID((uint16_t)0xFEAA), serviceData);
-  
-  // Set flags
-  oAdvertisementData.setFlags(0x06);  // General discoverable + BLE only
-  
-  // Update advertisement
+  //sets flags
+  oAdvertisementData.setFlags(0x06);  
+  //start advertisement
   pAdvertising->setAdvertisementData(oAdvertisementData);
   pAdvertising->start();
 }
@@ -132,6 +129,10 @@ void setup() {
   //initialize mutex
   mutex = xSemaphoreCreateCounting(buffer_length, 0); //counting semaphore
 
+  //Create Tasks
+  //Task 1: sensor read task which grabs a new temperature every second and puts that reading into a FreeRTOS Queue
+  //Task 2: waits for a new reading in the FreeRTOS Queue and puts the new reading into a shared ring buffer and increments a FreeRTOS Semaphore.
+  //Task 3: checks the FreeRTOS Semaphore and updates the BLE eddystone beacontemperature data with the new reading if available.
   xTaskCreatePinnedToCore(
     readTempandQueue,            // Task function
     "print from Queue",         // Task name
